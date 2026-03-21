@@ -1,0 +1,83 @@
+{
+  "POST /scopes — minimal (uses all config.py defaults)": {
+    "_comment": "Only required fields. DNS, exclusions, lease, and failover come from core/config.py",
+    "scope_name": "VLAN-120-Engineering",
+    "network": "10.20.120.0",
+    "subnet_mask": "255.255.255.0",
+    "start_range": "10.20.120.50",
+    "end_range": "10.20.120.240",
+    "gateway": "10.20.120.1",
+    "failover": {}
+  },
+
+  "POST /scopes — full (overrides everything)": {
+    "scope_name": "VLAN-200-DMZ",
+    "network": "10.30.200.0",
+    "subnet_mask": "255.255.255.0",
+    "start_range": "10.30.200.20",
+    "end_range": "10.30.200.230",
+    "lease_duration_days": 4,
+    "description": "DMZ segment VLAN 200",
+    "gateway": "10.30.200.1",
+    "dns_servers": ["10.10.2.10", "10.10.2.11"],
+    "dns_domain": "dmz.lab.local",
+    "exclusions": [
+      { "start_address": "10.30.200.1",   "end_address": "10.30.200.5"   },
+      { "start_address": "10.30.200.245", "end_address": "10.30.200.254" }
+    ],
+    "failover": {
+      "partner_server": "dhcp02.lab.local",
+      "relationship_name": "FO-DMZ-200",
+      "mode": "HotStandby",
+      "server_role": "Active",
+      "reserve_percent": 10,
+      "max_client_lead_time_minutes": 15,
+      "shared_secret": "Sup3rS3cret!"
+    }
+  },
+
+  "POST /scopes — LoadBalance failover": {
+    "scope_name": "VLAN-300-Guests",
+    "network": "10.40.0.0",
+    "subnet_mask": "255.255.254.0",
+    "start_range": "10.40.0.20",
+    "end_range": "10.40.1.240",
+    "gateway": "10.40.0.1",
+    "failover": {
+      "partner_server": "dhcp02.lab.local",
+      "mode": "LoadBalance",
+      "load_balance_percent": 60,
+      "max_client_lead_time_minutes": 30
+    }
+  },
+
+  "GET /scopes/{scope_id}/exists — example response (found)": {
+    "_comment": "No request body. Replace {scope_id} with the network address, e.g. GET /scopes/10.20.120.0/exists",
+    "_response_200_found":    { "scope_id": "10.20.120.0", "exists": true  },
+    "_response_200_notfound": { "scope_id": "10.20.120.0", "exists": false },
+    "_response_503_ps_down":  { "detail": "powershell.exe not found" }
+  },
+
+  "PATCH /scopes/{scope_id}/dns — update DNS servers and domain": {
+    "_comment": "Replace {scope_id} with the network address, e.g. PATCH /scopes/10.20.120.0/dns",
+    "_request": {
+      "dns_servers": ["10.10.1.5", "10.10.1.6"],
+      "dns_domain": "corp.local"
+    },
+    "_request_dns_only": {
+      "_comment2": "Omit dns_domain to leave the current suffix unchanged",
+      "dns_servers": ["10.10.1.5", "10.10.1.6"]
+    },
+    "_response_200_ok": {
+      "scope_id": "10.20.120.0",
+      "dns_servers": ["10.10.1.5", "10.10.1.6"],
+      "dns_domain": "corp.local"
+    },
+    "_response_404_scope_not_found": {
+      "detail": "Scope 10.20.120.0 not found"
+    },
+    "_response_500_ps_error": {
+      "detail": "Scope 10.20.120.0 is not present in the DHCP Server."
+    }
+  }
+}
