@@ -30,6 +30,14 @@ def _is_range_not_found(stderr: str) -> bool:
     "/{scope_id}/exclusions",
     response_model=ExclusionResponse,
     summary="Add an exclusion range to an existing scope",
+    responses={
+        200: {"description": "Exclusion range added successfully"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found"},
+        409: {"description": "One or more IPs in the range have active leases"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
@@ -41,8 +49,12 @@ async def add_exclusion(
     """
     Adds an IP exclusion range to the scope so those addresses are never leased.
 
-    Returns 409 if one or more IPs in the range are currently leased.
+    Returns 200 on success.
+    Returns 401 if the API key is missing or invalid.
     Returns 404 if the scope does not exist.
+    Returns 409 if one or more IPs in the range have active leases.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
     """
     try:
         check_exclusion_order(start, end)
@@ -76,6 +88,13 @@ async def add_exclusion(
     "/{scope_id}/exclusions",
     response_model=ExclusionResponse,
     summary="Remove an exclusion range from an existing scope",
+    responses={
+        200: {"description": "Exclusion range removed successfully"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found or exclusion range not found"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
@@ -87,7 +106,11 @@ async def remove_exclusion(
     """
     Removes an IP exclusion range from the scope.
 
+    Returns 200 on success.
+    Returns 401 if the API key is missing or invalid.
     Returns 404 if the scope or the exclusion range does not exist.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
     """
     try:
         check_exclusion_order(start, end)

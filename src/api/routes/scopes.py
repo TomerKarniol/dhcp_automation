@@ -31,6 +31,14 @@ router = APIRouter(prefix="/scopes", tags=["scopes"])
     response_model=DHCPScopeResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a DHCP scope with DNS, exclusions, and optional failover",
+    responses={
+        201: {"description": "Scope created successfully, all steps succeeded"},
+        207: {"description": "Scope created but a non-critical step failed — inspect steps[]"},
+        401: {"description": "Missing or invalid API key"},
+        409: {"description": "Scope already exists"},
+        500: {"description": "PowerShell command failed — scope was not created"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
@@ -44,8 +52,12 @@ async def create_scope(req: DHCPScopeRequest):
     4. **Add exclusions** – `Add-DhcpServerv4ExclusionRange`
     5. **Configure failover** – `Add-DhcpServerv4Failover` (if provided)
 
-    Returns 409 if a scope for this network already exists.
-    Returns 207 if a non-critical step fails (exclusions, failover).
+    Returns 201 if all steps succeeded.
+    Returns 207 if the scope was created but a non-critical step failed — inspect steps[].
+    Returns 401 if the API key is missing or invalid.
+    Returns 409 if the scope already exists.
+    Returns 500 if the PowerShell command failed and the scope was not created.
+    Returns 503 if PowerShell is unavailable or access is denied.
     """
     try:
         exists = await executor.scope_exists(str(req.network))
@@ -98,10 +110,20 @@ async def create_scope(req: DHCPScopeRequest):
     "",
     response_model=ScopeListResponse,
     summary="List all DHCP scopes",
+    responses={
+        200: {"description": "List of all DHCP scopes"},
+        401: {"description": "Missing or invalid API key"},
+        500: {"description": "PowerShell command failed"},
+    },
 )
 @log_route
 @http_response
 async def list_scopes():
+    """
+    Returns 200 with all DHCP scopes on this server.
+    Returns 401 if the API key is missing or invalid.
+    Returns 500 if the PowerShell command failed.
+    """
     result = await executor.list_scopes()
     if not result.success:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.stderr)
@@ -113,10 +135,20 @@ async def list_scopes():
     "/{scope_id}/exists",
     response_model=ScopeExistsResponse,
     summary="Check whether a scope exists for a given network segment",
+    responses={
+        200: {"description": "Scope existence check result"},
+        401: {"description": "Missing or invalid API key"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
 async def check_scope_exists(scope_id: IPv4Address = Path(...)):
+    """
+    Returns 200 with exists=true or exists=false.
+    Returns 401 if the API key is missing or invalid.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
     try:
         exists = await executor.scope_exists(str(scope_id))
     except RuntimeError as exc:
@@ -128,10 +160,24 @@ async def check_scope_exists(scope_id: IPv4Address = Path(...)):
     "/{scope_id}",
     response_model=ScopeDetailResponse,
     summary="Get details for a single scope",
+    responses={
+        200: {"description": "Scope details including options and exclusions"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
 async def get_scope(scope_id: IPv4Address = Path(...)):
+    """
+    Returns 200 with scope details including options and exclusions.
+    Returns 401 if the API key is missing or invalid.
+    Returns 404 if the scope does not exist.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
     scope_r, opts_r, excl_r = await executor.get_scope_detail(str(scope_id))
 
     if scope_r.return_code < 0:
@@ -169,10 +215,24 @@ async def get_scope(scope_id: IPv4Address = Path(...)):
     "/{scope_id}",
     response_model=DeleteScopeResponse,
     summary="Remove a DHCP scope (also removes its failover relationship)",
+    responses={
+        200: {"description": "Scope removed successfully"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
 async def delete_scope(scope_id: IPv4Address = Path(...)):
+    """
+    Returns 200 on success. Failover relationship is removed automatically before the scope.
+    Returns 401 if the API key is missing or invalid.
+    Returns 404 if the scope does not exist.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
     try:
         exists = await executor.scope_exists(str(scope_id))
     except RuntimeError as exc:
@@ -203,10 +263,24 @@ async def delete_scope(scope_id: IPv4Address = Path(...)):
     "/{scope_id}/state",
     response_model=ScopeStateResponse,
     summary="Activate or deactivate a DHCP scope",
+    responses={
+        200: {"description": "Scope state updated successfully"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
 async def set_scope_state(req: ScopeStateRequest, scope_id: IPv4Address = Path(...)):
+    """
+    Returns 200 with the updated scope state.
+    Returns 401 if the API key is missing or invalid.
+    Returns 404 if the scope does not exist.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
     try:
         exists = await executor.scope_exists(str(scope_id))
     except RuntimeError as exc:

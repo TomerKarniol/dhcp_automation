@@ -15,6 +15,13 @@ router = APIRouter(prefix="/scopes", tags=["dns"])
     "/{scope_id}/dns",
     response_model=DNSUpdateResponse,
     summary="Update DNS servers (and optional domain suffix) for an existing scope",
+    responses={
+        200: {"description": "DNS settings updated successfully"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
 )
 @log_route
 @http_response
@@ -26,7 +33,11 @@ async def update_dns(req: DNSUpdateRequest, scope_id: IPv4Address = Path(...)):
     - **dns_servers** – replaces the current list (option 006)
     - **dns_domain** – sets the DNS suffix (option 015); omit to leave unchanged
 
+    Returns 200 with the updated DNS settings.
+    Returns 401 if the API key is missing or invalid.
     Returns 404 if the scope does not exist.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
     """
     try:
         exists = await executor.scope_exists(str(scope_id))
