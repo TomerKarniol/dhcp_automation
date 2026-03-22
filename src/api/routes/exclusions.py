@@ -35,6 +35,7 @@ def _is_range_not_found(stderr: str) -> bool:
         401: {"description": "Missing or invalid API key"},
         404: {"description": "Scope not found"},
         409: {"description": "One or more IPs in the range have active leases"},
+        422: {"description": "start IP is greater than end IP"},
         500: {"description": "PowerShell command failed"},
         503: {"description": "PowerShell unavailable or access denied"},
     },
@@ -53,13 +54,14 @@ async def add_exclusion(
     Returns 401 if the API key is missing or invalid.
     Returns 404 if the scope does not exist.
     Returns 409 if one or more IPs in the range have active leases.
+    Returns 422 if start IP is greater than end IP.
     Returns 500 if the PowerShell command failed.
     Returns 503 if PowerShell is unavailable or access is denied.
     """
     try:
         check_exclusion_order(start, end)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
     try:
         exists = await executor.scope_exists(str(scope_id))
@@ -92,6 +94,7 @@ async def add_exclusion(
         200: {"description": "Exclusion range removed successfully"},
         401: {"description": "Missing or invalid API key"},
         404: {"description": "Scope not found or exclusion range not found"},
+        422: {"description": "start IP is greater than end IP"},
         500: {"description": "PowerShell command failed"},
         503: {"description": "PowerShell unavailable or access denied"},
     },
@@ -109,13 +112,14 @@ async def remove_exclusion(
     Returns 200 on success.
     Returns 401 if the API key is missing or invalid.
     Returns 404 if the scope or the exclusion range does not exist.
+    Returns 422 if start IP is greater than end IP.
     Returns 500 if the PowerShell command failed.
     Returns 503 if PowerShell is unavailable or access is denied.
     """
     try:
         check_exclusion_order(start, end)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
     try:
         exists = await executor.scope_exists(str(scope_id))
