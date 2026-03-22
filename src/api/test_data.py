@@ -1,91 +1,229 @@
 """Static fake DHCP scopes used by the /scopes/test endpoint.
 
-All entries conform to DHCPScopeInfo. They are intentionally varied:
-different subnets, subnet sizes, states, and naming patterns so that
-callers can exercise any client-side rendering logic.
+All entries conform to FullScopeInfo. Data is varied to exercise all
+possible field combinations: scopes with/without gateway, with/without
+failover, both failover modes, mixed Active/Inactive states, and one
+scope with a non-default lease duration.
 """
 
-from models.schemas import DHCPScopeInfo
+from models.schemas import FullScopeExclusion, FullScopeFailover, FullScopeInfo
 
-FAKE_SCOPES: list[DHCPScopeInfo] = [
-    DHCPScopeInfo(
+FAKE_SCOPES: list[FullScopeInfo] = [
+    FullScopeInfo(
         scope_id="10.10.10.0",
         name="HQ-Workstations",
         subnet_mask="255.255.255.0",
         start_range="10.10.10.11",
         end_range="10.10.10.240",
         state="Active",
+        lease_duration="8.00:00:00",
+        description="Floor 2 and 3 workstations",
+        gateway="10.10.10.1",
+        dns_servers=["10.10.1.5", "10.10.1.6"],
+        dns_domain="lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="10.10.10.1", end_range="10.10.10.10"),
+            FullScopeExclusion(start_range="10.10.10.241", end_range="10.10.10.254"),
+        ],
+        failover=FullScopeFailover(
+            relationship_name="FO-HQ-Workstations",
+            partner_server="dhcp02.lab.local",
+            mode="HotStandby",
+            state="Normal",
+            server_role="Active",
+            reserve_percent=5,
+            max_client_lead_time="1:00:00",
+            scope_ids=["10.10.10.0"],
+        ),
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="10.10.20.0",
         name="HQ-Printers",
         subnet_mask="255.255.255.0",
         start_range="10.10.20.11",
         end_range="10.10.20.50",
         state="Active",
+        lease_duration="8.00:00:00",
+        description=None,
+        gateway="10.10.20.1",
+        dns_servers=["10.10.1.5", "10.10.1.6"],
+        dns_domain="lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="10.10.20.1", end_range="10.10.20.10"),
+        ],
+        failover=None,
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="10.10.30.0",
         name="HQ-VoIP",
         subnet_mask="255.255.255.0",
         start_range="10.10.30.11",
         end_range="10.10.30.200",
         state="Active",
+        lease_duration="1.00:00:00",
+        description="VoIP handsets — short lease",
+        gateway="10.10.30.1",
+        dns_servers=["10.10.1.5", "10.10.1.6"],
+        dns_domain="lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="10.10.30.1", end_range="10.10.30.10"),
+            FullScopeExclusion(start_range="10.10.30.241", end_range="10.10.30.254"),
+        ],
+        failover=FullScopeFailover(
+            relationship_name="FO-HQ-VoIP",
+            partner_server="dhcp02.lab.local",
+            mode="HotStandby",
+            state="Normal",
+            server_role="Active",
+            reserve_percent=5,
+            max_client_lead_time="1:00:00",
+            scope_ids=["10.10.30.0"],
+        ),
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="10.20.0.0",
         name="Branch-A-Workstations",
         subnet_mask="255.255.254.0",
         start_range="10.20.0.11",
         end_range="10.20.1.240",
         state="Active",
+        lease_duration="8.00:00:00",
+        description=None,
+        gateway="10.20.0.1",
+        dns_servers=["10.10.1.5", "10.10.1.6"],
+        dns_domain="lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="10.20.0.1", end_range="10.20.0.10"),
+        ],
+        failover=FullScopeFailover(
+            relationship_name="FO-Branch-A",
+            partner_server="dhcp02.lab.local",
+            mode="LoadBalance",
+            state="Normal",
+            load_balance_percent=50,
+            max_client_lead_time="1:00:00",
+            scope_ids=["10.20.0.0", "10.20.10.0"],
+        ),
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="10.20.10.0",
         name="Branch-A-WiFi-Guest",
         subnet_mask="255.255.255.0",
         start_range="10.20.10.11",
         end_range="10.20.10.240",
         state="Active",
+        lease_duration="8.00:00:00",
+        description=None,
+        gateway="10.20.10.1",
+        dns_servers=["8.8.8.8", "8.8.4.4"],
+        dns_domain=None,
+        exclusions=[
+            FullScopeExclusion(start_range="10.20.10.1", end_range="10.20.10.10"),
+            FullScopeExclusion(start_range="10.20.10.241", end_range="10.20.10.254"),
+        ],
+        failover=FullScopeFailover(
+            relationship_name="FO-Branch-A",
+            partner_server="dhcp02.lab.local",
+            mode="LoadBalance",
+            state="Normal",
+            load_balance_percent=50,
+            max_client_lead_time="1:00:00",
+            scope_ids=["10.20.0.0", "10.20.10.0"],
+        ),
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="10.30.0.0",
         name="Branch-B-Workstations",
         subnet_mask="255.255.255.0",
         start_range="10.30.0.11",
         end_range="10.30.0.240",
         state="Inactive",
+        lease_duration="8.00:00:00",
+        description="Branch B — decommissioned, pending removal",
+        gateway="10.30.0.1",
+        dns_servers=["10.10.1.5", "10.10.1.6"],
+        dns_domain="lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="10.30.0.1", end_range="10.30.0.10"),
+            FullScopeExclusion(start_range="10.30.0.241", end_range="10.30.0.254"),
+        ],
+        failover=None,
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="172.16.1.0",
         name="Lab-Servers",
         subnet_mask="255.255.255.0",
         start_range="172.16.1.11",
         end_range="172.16.1.200",
         state="Active",
+        lease_duration="8.00:00:00",
+        description=None,
+        gateway="172.16.1.1",
+        dns_servers=["10.10.1.5", "10.10.1.6"],
+        dns_domain="lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="172.16.1.1", end_range="172.16.1.10"),
+            FullScopeExclusion(start_range="172.16.1.241", end_range="172.16.1.254"),
+        ],
+        failover=None,
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="172.16.2.0",
         name="Lab-TestBench",
         subnet_mask="255.255.255.128",
         start_range="172.16.2.11",
         end_range="172.16.2.120",
         state="Inactive",
+        lease_duration="8.00:00:00",
+        description=None,
+        gateway=None,
+        dns_servers=[],
+        dns_domain=None,
+        exclusions=[],
+        failover=None,
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="192.168.100.0",
         name="Remote-VPN-Pool",
         subnet_mask="255.255.255.0",
         start_range="192.168.100.50",
         end_range="192.168.100.200",
         state="Active",
+        lease_duration="8.00:00:00",
+        description="SSL VPN address pool",
+        gateway=None,
+        dns_servers=["10.10.1.5", "10.10.1.6"],
+        dns_domain="lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="192.168.100.1", end_range="192.168.100.10"),
+        ],
+        failover=FullScopeFailover(
+            relationship_name="FO-VPN",
+            partner_server="dhcp02.lab.local",
+            mode="HotStandby",
+            state="Normal",
+            server_role="Active",
+            reserve_percent=10,
+            max_client_lead_time="1:00:00",
+            scope_ids=["192.168.100.0"],
+        ),
     ),
-    DHCPScopeInfo(
+    FullScopeInfo(
         scope_id="192.168.200.0",
         name="IoT-Devices",
         subnet_mask="255.255.255.0",
         start_range="192.168.200.11",
         end_range="192.168.200.240",
         state="Active",
+        lease_duration="8.00:00:00",
+        description=None,
+        gateway="192.168.200.1",
+        dns_servers=["10.10.1.5"],
+        dns_domain="iot.lab.local",
+        exclusions=[
+            FullScopeExclusion(start_range="192.168.200.1", end_range="192.168.200.10"),
+            FullScopeExclusion(start_range="192.168.200.241", end_range="192.168.200.254"),
+        ],
+        failover=None,
     ),
 ]

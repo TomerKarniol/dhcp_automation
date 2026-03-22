@@ -164,32 +164,64 @@ class DHCPScopeRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-#  Scope list / detail responses
-#  Fields use PowerShell alias names so model_validate(ps_json_dict) works
-#  directly without manual mapping.
+#  Full-detail scope response models
+#  Used by GET /scopes, GET /scopes/{scope_id}, and GET /scopes/test.
+#  All optional fields default to None / empty list so scopes with no options
+#  or failover serialize cleanly without errors.
 # --------------------------------------------------------------------------- #
 
-class DHCPScopeInfo(BaseModel):
-    """One scope row from Get-DhcpServerv4Scope.
+class FullScopeExclusion(BaseModel):
+    """One exclusion range within a scope."""
 
-    Field names are snake_case Python names.  Routes are responsible for
-    mapping PascalCase PowerShell property names before constructing this model.
-    """
+    start_range: str
+    end_range: str
 
+
+class FullScopeFailover(BaseModel):
+    """Failover relationship details from Get-DhcpServerv4Failover."""
+
+    relationship_name: str
+    partner_server: str
+    mode: str
+    state: str
+    server_role: Optional[str] = None            # HotStandby only
+    reserve_percent: Optional[int] = None         # HotStandby only
+    load_balance_percent: Optional[int] = None    # LoadBalance only
+    max_client_lead_time: Optional[str] = None    # TimeSpan string e.g. "1:00:00"
+    scope_ids: list[str] = []
+
+
+class FullScopeInfo(BaseModel):
+    """Complete scope record combining Get-DhcpServerv4Scope, options, exclusions, and failover."""
+
+    # --- From Get-DhcpServerv4Scope ---
     scope_id: str
     name: str
     subnet_mask: str
     start_range: str
     end_range: str
     state: str
+    lease_duration: Optional[str] = None   # TimeSpan string e.g. "8.00:00:00"
+    description: Optional[str] = None
+
+    # --- From Get-DhcpServerv4OptionValue ---
+    gateway: Optional[str] = None          # option 003
+    dns_servers: list[str] = []            # option 006
+    dns_domain: Optional[str] = None       # option 015
+
+    # --- From Get-DhcpServerv4ExclusionRange ---
+    exclusions: list[FullScopeExclusion] = []
+
+    # --- From Get-DhcpServerv4Failover ---
+    failover: Optional[FullScopeFailover] = None
 
 
-class ScopeListResponse(BaseModel):
-    scopes: list[DHCPScopeInfo]
+class FullScopeListResponse(BaseModel):
+    scopes: list[FullScopeInfo]
     count: int
 
     @model_validator(mode="after")
-    def _validate_count(self) -> "ScopeListResponse":
+    def _validate_count(self) -> "FullScopeListResponse":
         if self.count != len(self.scopes):
             raise ValueError(
                 f"count ({self.count}) does not match number of scopes ({len(self.scopes)})"
@@ -197,12 +229,8 @@ class ScopeListResponse(BaseModel):
         return self
 
 
-class ScopeDetailResponse(BaseModel):
-    """Full scope detail: scope info + options + exclusion ranges."""
-
-    scope: DHCPScopeInfo
-    options: list[Any]      # raw PS JSON – structure varies by option type
-    exclusions: list[Any]   # raw PS JSON
+class FullScopeDetailResponse(BaseModel):
+    scope: FullScopeInfo
 
 
 # --------------------------------------------------------------------------- #
@@ -217,7 +245,7 @@ class DNSUpdateRequest(BaseModel):
 class DNSUpdateResponse(BaseModel):
     scope_id: str
     dns_servers: list[str]
-    dns_domain: Optional[str]
+    dns_domain: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -258,7 +286,7 @@ class ExclusionResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 
 class FailoverListResponse(BaseModel):
-    relationships: list[Any]  # raw PS JSON – field names vary
+    relationships: list[dict[str, Any]]  # raw PS JSON – field names vary by PS version
     count: int
 
     @model_validator(mode="after")

@@ -39,7 +39,7 @@ def check_subnet_mask(mask: IPv4Address) -> IPv4Address:
 def check_range_order(start: IPv4Address, end: IPv4Address) -> None:
     """Validate that *start* is strictly less than *end*."""
     if int(start) >= int(end):
-        raise ValueError("start_range must be less than end_range")
+        raise ValueError("start_range must be strictly less than end_range")
 
 
 def check_address_in_network(

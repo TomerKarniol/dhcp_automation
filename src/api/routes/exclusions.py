@@ -61,7 +61,7 @@ async def add_exclusion(
     try:
         check_exclusion_order(start, end)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
     try:
         exists = await executor.scope_exists(str(scope_id))
@@ -119,7 +119,7 @@ async def remove_exclusion(
     try:
         check_exclusion_order(start, end)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
     try:
         exists = await executor.scope_exists(str(scope_id))

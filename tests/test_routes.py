@@ -9,9 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from helpers import _fail, _ok, _unavailable
+from helpers import _fail, _ok
 from main import app
-from services.executor import CommandResult
+from models.schemas import FullScopeInfo
+from services.executor import PowerShellUnavailableError, ScopeNotFoundError
 
 client = TestClient(app, headers={"X-API-Key": "BALBALA"})
 unauthenticated_client = TestClient(app, raise_server_exceptions=False)
@@ -27,7 +28,19 @@ SCOPE_PAYLOAD = {
     "failover": None,
 }
 
-SCOPE_JSON = '{"ScopeId":"10.99.0.0","Name":"VLAN-99-Test","SubnetMask":"255.255.255.0","StartRange":"10.99.0.50","EndRange":"10.99.0.240","State":"Active"}'
+# Minimal FullScopeInfo used across multiple test classes
+FAKE_SCOPE = FullScopeInfo(
+    scope_id="10.99.0.0",
+    name="VLAN-99-Test",
+    subnet_mask="255.255.255.0",
+    start_range="10.99.0.50",
+    end_range="10.99.0.240",
+    state="Active",
+    lease_duration="8.00:00:00",
+    gateway="10.99.0.1",
+    dns_servers=["10.10.1.5", "10.10.1.6"],
+    dns_domain="lab.local",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -149,27 +162,33 @@ class TestCreateScope:
 
 class TestListScopes:
     def test_success_returns_structured_response(self):
-        with patch("services.executor.run_powershell", new_callable=AsyncMock) as mock_ps:
-            mock_ps.return_value = _ok(f"[{SCOPE_JSON}]")
+        with patch("services.executor.build_full_scope_list", new_callable=AsyncMock, return_value=[FAKE_SCOPE]):
             resp = client.get("/scopes")
         assert resp.status_code == 200
         body = resp.json()
         assert "scopes" in body
         assert body["count"] == 1
-        assert body["scopes"][0]["scope_id"] == "10.99.0.0"
+        scope = body["scopes"][0]
+        assert scope["scope_id"] == "10.99.0.0"
+        assert scope["gateway"] == "10.99.0.1"
+        assert scope["dns_servers"] == ["10.10.1.5", "10.10.1.6"]
+        assert scope["dns_domain"] == "lab.local"
 
-    def test_single_scope_normalized_to_list(self):
-        with patch("services.executor.run_powershell", new_callable=AsyncMock) as mock_ps:
-            mock_ps.return_value = _ok(SCOPE_JSON)  # object, not array
+    def test_empty_server_returns_empty_list(self):
+        with patch("services.executor.build_full_scope_list", new_callable=AsyncMock, return_value=[]):
             resp = client.get("/scopes")
         assert resp.status_code == 200
-        assert resp.json()["count"] == 1
+        assert resp.json() == {"scopes": [], "count": 0}
 
     def test_powershell_failure_returns_500(self):
-        with patch("services.executor.run_powershell", new_callable=AsyncMock) as mock_ps:
-            mock_ps.return_value = _fail()
+        with patch("services.executor.build_full_scope_list", new_callable=AsyncMock, side_effect=RuntimeError("PS failed")):
             resp = client.get("/scopes")
         assert resp.status_code == 500
+
+    def test_powershell_unavailable_returns_503(self):
+        with patch("services.executor.build_full_scope_list", new_callable=AsyncMock, side_effect=PowerShellUnavailableError("powershell.exe not found")):
+            resp = client.get("/scopes")
+        assert resp.status_code == 503
 
 
 # --------------------------------------------------------------------------- #
@@ -177,38 +196,58 @@ class TestListScopes:
 # --------------------------------------------------------------------------- #
 
 class TestGetScope:
-    def _mock_detail(self, scope_ok=True, rc=0):
-        async def side_effect(cmd, **kwargs):
-            if "Get-DhcpServerv4Scope -ScopeId" in cmd and "OptionValue" not in cmd and "ExclusionRange" not in cmd:
-                if not scope_ok:
-                    return CommandResult(return_code=rc, stdout="", stderr="Scope not found")
-                return _ok(SCOPE_JSON)
-            return _ok("[]")
-        return side_effect
-
-    def test_scope_found_returns_structured_detail(self):
-        with patch("services.executor.run_powershell", side_effect=self._mock_detail()):
+    def test_scope_found_returns_full_detail(self):
+        with patch("services.executor.build_full_scope_detail", new_callable=AsyncMock, return_value=FAKE_SCOPE):
             resp = client.get("/scopes/10.99.0.0")
         assert resp.status_code == 200
         body = resp.json()
         assert "scope" in body
-        assert body["scope"]["scope_id"] == "10.99.0.0"
-        assert "options" in body
-        assert "exclusions" in body
+        scope = body["scope"]
+        assert scope["scope_id"] == "10.99.0.0"
+        assert scope["gateway"] == "10.99.0.1"
+        assert scope["dns_servers"] == ["10.10.1.5", "10.10.1.6"]
+        assert "exclusions" in scope
+        assert "failover" in scope
+        # Old response structure is gone
+        assert "options" not in body
 
     def test_scope_not_found_returns_404(self):
-        with patch("services.executor.run_powershell", side_effect=self._mock_detail(scope_ok=False, rc=1)):
+        with patch("services.executor.build_full_scope_detail", new_callable=AsyncMock, side_effect=ScopeNotFoundError("not found")):
             resp = client.get("/scopes/10.99.0.0")
         assert resp.status_code == 404
 
     def test_powershell_unavailable_returns_503(self):
-        with patch("services.executor.run_powershell", side_effect=self._mock_detail(scope_ok=False, rc=-2)):
+        with patch("services.executor.build_full_scope_detail", new_callable=AsyncMock, side_effect=PowerShellUnavailableError("powershell.exe not found")):
             resp = client.get("/scopes/10.99.0.0")
         assert resp.status_code == 503
 
     def test_invalid_scope_id_returns_422(self):
         resp = client.get("/scopes/not-an-ip")
         assert resp.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+#  GET /scopes/test
+# --------------------------------------------------------------------------- #
+
+class TestGetTestScopes:
+    def test_returns_10_scopes(self):
+        resp = client.get("/scopes/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 10
+        assert len(body["scopes"]) == 10
+
+    def test_each_scope_has_full_shape(self):
+        resp = client.get("/scopes/test")
+        for scope in resp.json()["scopes"]:
+            assert "scope_id" in scope
+            assert "gateway" in scope
+            assert "dns_servers" in scope
+            assert "dns_domain" in scope
+            assert "exclusions" in scope
+            assert "failover" in scope
+            assert "lease_duration" in scope
 
 
 # --------------------------------------------------------------------------- #
@@ -275,7 +314,6 @@ class TestDeleteScope:
 
         assert any("Failover" in cmd or "failover" in cmd.lower() for cmd in captured), \
             "Expected a failover removal command"
-        # Failover removal should appear before scope removal
         failover_idx = next(i for i, c in enumerate(captured) if "Failover" in c or "failover" in c.lower())
         scope_idx = next(i for i, c in enumerate(captured) if "Remove-DhcpServerv4Scope" in c)
         assert failover_idx < scope_idx
@@ -351,7 +389,6 @@ class TestUpdateDNS:
                     json={"dns_servers": ["10.10.1.5", "10.10.1.6"], "dns_domain": "corp.local"},
                 )
 
-        # One call: the DNS update command
         assert len(captured) == 1
         assert "10.99.0.0" in captured[0]
         assert "10.10.1.5,10.10.1.6" in captured[0]

@@ -12,11 +12,16 @@ from helpers import _fail, _ok, _unavailable
 from models.schemas import DHCPScopeRequest
 from services.executor import (
     DHCPProvisioner,
+    PowerShellUnavailableError,
+    ScopeNotFoundError,
     _minutes_to_timespan,
     delete_scope,
+    full_scope_from_ps,
+    parse_exclusions_by_scope,
+    parse_failovers_by_scope,
+    parse_options_by_scope,
     parse_ps_json,
     scope_exists,
-    scope_info_from_ps,
     set_scope_state,
 )
 
@@ -83,7 +88,6 @@ async def test_exclusion_failure_does_not_abort_pipeline():
     async def side_effect(cmd, **kwargs):
         nonlocal call_count
         call_count += 1
-        # Fail only on exclusion commands
         if "ExclusionRange" in cmd:
             return _fail("Exclusion conflict")
         return _ok()
@@ -96,7 +100,6 @@ async def test_exclusion_failure_does_not_abort_pipeline():
     other_steps = [s for s in steps if not s.step.startswith("add_exclusion")]
 
     assert all(not s.success for s in exclusion_steps)
-    # Non-exclusion steps should not be skipped
     assert all(s.command != "(skipped)" for s in other_steps)
 
 
@@ -114,7 +117,6 @@ async def test_gateway_failure_does_not_abort_pipeline():
     gateway_step = next(s for s in steps if s.step == "set_gateway")
     assert not gateway_step.success
 
-    # Exclusion steps must still have executed (not skipped)
     exclusion_steps = [s for s in steps if s.step.startswith("add_exclusion")]
     assert len(exclusion_steps) > 0
     assert all(s.command != "(skipped)" for s in exclusion_steps)
@@ -276,10 +278,10 @@ class TestParsePsJson:
 
 
 # --------------------------------------------------------------------------- #
-#  scope_info_from_ps
+#  full_scope_from_ps
 # --------------------------------------------------------------------------- #
 
-class TestScopeInfoFromPs:
+class TestFullScopeFromPs:
     VALID = {
         "ScopeId": "10.0.1.0",
         "Name": "TEST-VLAN",
@@ -287,30 +289,193 @@ class TestScopeInfoFromPs:
         "StartRange": "10.0.1.50",
         "EndRange": "10.0.1.240",
         "State": "Active",
+        "LeaseDuration": "8.00:00:00",
+        "Description": "Test scope",
     }
 
-    def test_valid_dict_maps_all_fields(self):
-        result = scope_info_from_ps(self.VALID)
+    def test_valid_dict_maps_all_base_fields(self):
+        result = full_scope_from_ps(self.VALID)
         assert result["scope_id"] == "10.0.1.0"
         assert result["name"] == "TEST-VLAN"
         assert result["subnet_mask"] == "255.255.255.0"
         assert result["start_range"] == "10.0.1.50"
         assert result["end_range"] == "10.0.1.240"
         assert result["state"] == "Active"
+        assert result["lease_duration"] == "8.00:00:00"
+        assert result["description"] == "Test scope"
 
-    def test_missing_scope_id_raises(self):
+    def test_missing_lease_duration_maps_to_none(self):
+        d = {k: v for k, v in self.VALID.items() if k != "LeaseDuration"}
+        result = full_scope_from_ps(d)
+        assert result["lease_duration"] is None
+
+    def test_missing_description_maps_to_none(self):
+        d = {k: v for k, v in self.VALID.items() if k != "Description"}
+        result = full_scope_from_ps(d)
+        assert result["description"] is None
+
+    def test_missing_required_field_raises(self):
         d = {k: v for k, v in self.VALID.items() if k != "ScopeId"}
         with pytest.raises(RuntimeError, match="missing keys"):
-            scope_info_from_ps(d)
+            full_scope_from_ps(d)
 
-    def test_missing_multiple_keys_lists_all_in_error(self):
+    def test_missing_multiple_required_fields_raises(self):
         with pytest.raises(RuntimeError, match="missing keys"):
-            scope_info_from_ps({})
+            full_scope_from_ps({})
 
-    def test_extra_keys_are_ignored(self):
-        d = {**self.VALID, "LeaseDuration": "8.00:00:00", "Type": "Dhcp"}
-        result = scope_info_from_ps(d)
-        assert "LeaseDuration" not in result
+    def test_does_not_include_option_fields(self):
+        """Options/exclusions/failover are not set by this function."""
+        result = full_scope_from_ps(self.VALID)
+        assert "gateway" not in result
+        assert "dns_servers" not in result
+        assert "exclusions" not in result
+
+
+# --------------------------------------------------------------------------- #
+#  parse_options_by_scope
+# --------------------------------------------------------------------------- #
+
+class TestParseOptionsByScope:
+    def test_extracts_gateway_dns_domain(self):
+        options = [
+            {"ScopeId": "10.0.1.0", "OptionId": 3, "Value": ["10.0.1.1"]},
+            {"ScopeId": "10.0.1.0", "OptionId": 6, "Value": ["10.10.1.5", "10.10.1.6"]},
+            {"ScopeId": "10.0.1.0", "OptionId": 15, "Value": ["lab.local"]},
+        ]
+        result = parse_options_by_scope(options)
+        assert result["10.0.1.0"]["gateway"] == "10.0.1.1"
+        assert result["10.0.1.0"]["dns_servers"] == ["10.10.1.5", "10.10.1.6"]
+        assert result["10.0.1.0"]["dns_domain"] == "lab.local"
+
+    def test_multiple_scopes_keyed_separately(self):
+        options = [
+            {"ScopeId": "10.0.1.0", "OptionId": 3, "Value": ["10.0.1.1"]},
+            {"ScopeId": "10.0.2.0", "OptionId": 3, "Value": ["10.0.2.1"]},
+        ]
+        result = parse_options_by_scope(options)
+        assert result["10.0.1.0"]["gateway"] == "10.0.1.1"
+        assert result["10.0.2.0"]["gateway"] == "10.0.2.1"
+
+    def test_missing_scope_id_skipped(self):
+        options = [{"OptionId": 3, "Value": ["10.0.0.1"]}]  # no ScopeId = server-level option
+        result = parse_options_by_scope(options)
+        assert result == {}
+
+    def test_empty_value_list_skipped(self):
+        options = [{"ScopeId": "10.0.1.0", "OptionId": 3, "Value": []}]
+        result = parse_options_by_scope(options)
+        assert result["10.0.1.0"]["gateway"] is None
+
+    def test_none_value_skipped(self):
+        options = [{"ScopeId": "10.0.1.0", "OptionId": 6, "Value": None}]
+        result = parse_options_by_scope(options)
+        assert result["10.0.1.0"]["dns_servers"] == []
+
+    def test_unknown_option_id_ignored(self):
+        options = [{"ScopeId": "10.0.1.0", "OptionId": 44, "Value": ["something"]}]
+        result = parse_options_by_scope(options)
+        assert result["10.0.1.0"]["gateway"] is None
+        assert result["10.0.1.0"]["dns_servers"] == []
+        assert result["10.0.1.0"]["dns_domain"] is None
+
+    def test_empty_input_returns_empty_dict(self):
+        assert parse_options_by_scope([]) == {}
+
+
+# --------------------------------------------------------------------------- #
+#  parse_exclusions_by_scope
+# --------------------------------------------------------------------------- #
+
+class TestParseExclusionsByScope:
+    def test_groups_by_scope_id(self):
+        exclusions = [
+            {"ScopeId": "10.0.1.0", "StartRange": "10.0.1.1", "EndRange": "10.0.1.10"},
+            {"ScopeId": "10.0.1.0", "StartRange": "10.0.1.241", "EndRange": "10.0.1.254"},
+        ]
+        result = parse_exclusions_by_scope(exclusions)
+        assert len(result["10.0.1.0"]) == 2
+        assert result["10.0.1.0"][0]["start_range"] == "10.0.1.1"
+        assert result["10.0.1.0"][1]["end_range"] == "10.0.1.254"
+
+    def test_multiple_scopes_keyed_separately(self):
+        exclusions = [
+            {"ScopeId": "10.0.1.0", "StartRange": "10.0.1.1", "EndRange": "10.0.1.10"},
+            {"ScopeId": "10.0.2.0", "StartRange": "10.0.2.1", "EndRange": "10.0.2.10"},
+        ]
+        result = parse_exclusions_by_scope(exclusions)
+        assert "10.0.1.0" in result
+        assert "10.0.2.0" in result
+        assert len(result["10.0.1.0"]) == 1
+        assert len(result["10.0.2.0"]) == 1
+
+    def test_missing_scope_id_skipped(self):
+        exclusions = [{"StartRange": "10.0.0.1", "EndRange": "10.0.0.10"}]
+        result = parse_exclusions_by_scope(exclusions)
+        assert result == {}
+
+    def test_empty_input_returns_empty_dict(self):
+        assert parse_exclusions_by_scope([]) == {}
+
+
+# --------------------------------------------------------------------------- #
+#  parse_failovers_by_scope
+# --------------------------------------------------------------------------- #
+
+class TestParseFailoversByScope:
+    def test_single_scope_relationship(self):
+        failovers = [{
+            "Name": "FO-TEST",
+            "PartnerServer": "dhcp02.lab.local",
+            "Mode": "HotStandby",
+            "State": "Normal",
+            "ServerRole": "Active",
+            "ReservePercent": 5,
+            "MaxClientLeadTime": "1:00:00",
+            "ScopeId": "10.0.1.0",
+        }]
+        result = parse_failovers_by_scope(failovers)
+        assert "10.0.1.0" in result
+        fo = result["10.0.1.0"]
+        assert fo["relationship_name"] == "FO-TEST"
+        assert fo["partner_server"] == "dhcp02.lab.local"
+        assert fo["mode"] == "HotStandby"
+        assert fo["server_role"] == "Active"
+        assert fo["reserve_percent"] == 5
+
+    def test_multi_scope_relationship_indexes_each_scope(self):
+        """One relationship covering two scopes should appear under both keys."""
+        failovers = [{
+            "Name": "FO-BRANCH",
+            "PartnerServer": "dhcp02.lab.local",
+            "Mode": "LoadBalance",
+            "State": "Normal",
+            "LoadBalancePercent": 50,
+            "ScopeId": ["10.0.1.0", "10.0.2.0"],
+        }]
+        result = parse_failovers_by_scope(failovers)
+        assert "10.0.1.0" in result
+        assert "10.0.2.0" in result
+        assert result["10.0.1.0"]["relationship_name"] == "FO-BRANCH"
+        assert result["10.0.2.0"]["relationship_name"] == "FO-BRANCH"
+        assert result["10.0.1.0"]["scope_ids"] == ["10.0.1.0", "10.0.2.0"]
+
+    def test_loadbalance_mode_fields(self):
+        failovers = [{
+            "Name": "FO-LB",
+            "PartnerServer": "dhcp02",
+            "Mode": "LoadBalance",
+            "State": "Normal",
+            "LoadBalancePercent": 60,
+            "ScopeId": "10.0.1.0",
+        }]
+        result = parse_failovers_by_scope(failovers)
+        fo = result["10.0.1.0"]
+        assert fo["load_balance_percent"] == 60
+        assert fo["server_role"] is None
+        assert fo["reserve_percent"] is None
+
+    def test_empty_input_returns_empty_dict(self):
+        assert parse_failovers_by_scope([]) == {}
 
 
 # --------------------------------------------------------------------------- #

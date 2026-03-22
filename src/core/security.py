@@ -15,6 +15,11 @@ _header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
 def require_api_key(key: str = Security(_header)) -> str:
     expected = os.getenv("DHCP_API_KEY", "")
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server misconfiguration: DHCP_API_KEY is not set",
+        )
     if key != expected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -37,6 +37,10 @@ def validate_config() -> None:
                     f"DEFAULT_DNS_SERVERS contains invalid IPv4 address: {entry!r}"
                 )
 
+    # DNS domain – must be None or a non-empty string
+    if config.DEFAULT_DNS_DOMAIN is not None and not config.DEFAULT_DNS_DOMAIN.strip():
+        errors.append("DEFAULT_DNS_DOMAIN must be None or a non-empty string")
+
     # Failover partner – must be non-empty
     if not config.DEFAULT_FAILOVER_PARTNER.strip():
         errors.append("DEFAULT_FAILOVER_PARTNER must not be empty")

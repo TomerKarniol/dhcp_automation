@@ -1,38 +1,39 @@
 """DHCP scope CRUD endpoints."""
 
-import logging
 from ipaddress import IPv4Address
 
 from fastapi import APIRouter, HTTPException, Path, status
 from fastapi.responses import JSONResponse
 
+from api.test_data import FAKE_SCOPES
 from core.decorators import http_response, log_route
-
-logger = logging.getLogger("dhcp_api.routes")
 from models.schemas import (
-    DHCPScopeInfo,
     DHCPScopeRequest,
     DHCPScopeResponse,
     DeleteScopeResponse,
-    ScopeDetailResponse,
+    FullScopeDetailResponse,
+    FullScopeListResponse,
     ScopeExistsResponse,
-    ScopeListResponse,
     ScopeStateRequest,
     ScopeStateResponse,
 )
-from api.test_data import FAKE_SCOPES
 from services import executor
-from services.executor import DHCPProvisioner, parse_ps_json, scope_info_from_ps
+from services.executor import (
+    DHCPProvisioner,
+    PowerShellUnavailableError,
+    ScopeNotFoundError,
+)
+
 
 router = APIRouter(prefix="/scopes", tags=["scopes"])
 
 
 @router.get(
     "/test",
-    response_model=ScopeListResponse,
+    response_model=FullScopeListResponse,
     summary="Return 10 fake DHCP scopes for client testing",
     responses={
-        200: {"description": "Ten fake scopes in the standard ScopeListResponse shape"},
+        200: {"description": "Ten fake scopes in the standard FullScopeListResponse shape"},
         401: {"description": "Missing or invalid API key"},
     },
 )
@@ -41,13 +42,108 @@ router = APIRouter(prefix="/scopes", tags=["scopes"])
 async def get_test_scopes():
     """
     Returns a static list of 10 fake DHCP scopes that match the real response
-    structure. No PowerShell is executed. Use this endpoint to develop and test
-    clients without a live DHCP server.
+    structure, including options, exclusions, and failover. No PowerShell is
+    executed. Use this endpoint to develop and test clients without a live
+    DHCP server.
 
     Returns 200 with the fake scope list.
     Returns 401 if the API key is missing or invalid.
     """
-    return ScopeListResponse(scopes=FAKE_SCOPES, count=len(FAKE_SCOPES))
+    return FullScopeListResponse(scopes=FAKE_SCOPES, count=len(FAKE_SCOPES))
+
+
+@router.get(
+    "",
+    response_model=FullScopeListResponse,
+    summary="List all DHCP scopes with full configuration details",
+    responses={
+        200: {"description": "All scopes with DNS, gateway, exclusions, and failover details"},
+        401: {"description": "Missing or invalid API key"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
+)
+@log_route
+@http_response
+async def list_scopes():
+    """
+    Returns all DHCP scopes with full configuration detail in a single call.
+    Executes 4 PowerShell commands in parallel: scope list, all options,
+    all exclusions, and failover. Results are joined in Python by ScopeId.
+
+    Returns 200 with the full scope list.
+    Returns 401 if the API key is missing or invalid.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
+    try:
+        scopes = await executor.build_full_scope_list()
+    except PowerShellUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    return FullScopeListResponse(scopes=scopes, count=len(scopes))
+
+
+@router.get(
+    "/{scope_id}/exists",
+    response_model=ScopeExistsResponse,
+    summary="Check whether a scope exists for a given network segment",
+    responses={
+        200: {"description": "Scope existence check result"},
+        401: {"description": "Missing or invalid API key"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
+)
+@log_route
+@http_response
+async def check_scope_exists(scope_id: IPv4Address = Path(...)):
+    """
+    Returns 200 with exists=true or exists=false.
+    Returns 401 if the API key is missing or invalid.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
+    try:
+        exists = await executor.scope_exists(str(scope_id))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    return ScopeExistsResponse(scope_id=str(scope_id), exists=exists)
+
+
+@router.get(
+    "/{scope_id}",
+    response_model=FullScopeDetailResponse,
+    summary="Get full details for a single scope",
+    responses={
+        200: {"description": "Full scope details including options, exclusions, and failover"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
+)
+@log_route
+@http_response
+async def get_scope(scope_id: IPv4Address = Path(...)):
+    """
+    Returns full scope detail including gateway, DNS servers, DNS domain,
+    exclusion ranges, and failover configuration. Executes 4 PowerShell
+    commands in parallel.
+
+    Returns 200 with complete scope details.
+    Returns 401 if the API key is missing or invalid.
+    Returns 404 if the scope does not exist.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
+    try:
+        scope = await executor.build_full_scope_detail(str(scope_id))
+    except PowerShellUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except ScopeNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scope {scope_id} not found",
+        )
+    return FullScopeDetailResponse(scope=scope)
 
 
 @router.post(
@@ -130,111 +226,6 @@ async def create_scope(req: DHCPScopeRequest):
     return response
 
 
-@router.get(
-    "",
-    response_model=ScopeListResponse,
-    summary="List all DHCP scopes",
-    responses={
-        200: {"description": "List of all DHCP scopes"},
-        401: {"description": "Missing or invalid API key"},
-        500: {"description": "PowerShell command failed"},
-    },
-)
-@log_route
-@http_response
-async def list_scopes():
-    """
-    Returns 200 with all DHCP scopes on this server.
-    Returns 401 if the API key is missing or invalid.
-    Returns 500 if the PowerShell command failed.
-    """
-    result = await executor.list_scopes()
-    if not result.success:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.stderr)
-    scopes = [DHCPScopeInfo(**scope_info_from_ps(s)) for s in parse_ps_json(result.stdout)]
-    return ScopeListResponse(scopes=scopes, count=len(scopes))
-
-
-@router.get(
-    "/{scope_id}/exists",
-    response_model=ScopeExistsResponse,
-    summary="Check whether a scope exists for a given network segment",
-    responses={
-        200: {"description": "Scope existence check result"},
-        401: {"description": "Missing or invalid API key"},
-        503: {"description": "PowerShell unavailable or access denied"},
-    },
-)
-@log_route
-@http_response
-async def check_scope_exists(scope_id: IPv4Address = Path(...)):
-    """
-    Returns 200 with exists=true or exists=false.
-    Returns 401 if the API key is missing or invalid.
-    Returns 503 if PowerShell is unavailable or access is denied.
-    """
-    try:
-        exists = await executor.scope_exists(str(scope_id))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
-    return ScopeExistsResponse(scope_id=str(scope_id), exists=exists)
-
-
-@router.get(
-    "/{scope_id}",
-    response_model=ScopeDetailResponse,
-    summary="Get details for a single scope",
-    responses={
-        200: {"description": "Scope details including options and exclusions"},
-        401: {"description": "Missing or invalid API key"},
-        404: {"description": "Scope not found"},
-        500: {"description": "PowerShell command failed"},
-        503: {"description": "PowerShell unavailable or access denied"},
-    },
-)
-@log_route
-@http_response
-async def get_scope(scope_id: IPv4Address = Path(...)):
-    """
-    Returns 200 with scope details including options and exclusions.
-    Returns 401 if the API key is missing or invalid.
-    Returns 404 if the scope does not exist.
-    Returns 500 if the PowerShell command failed.
-    Returns 503 if PowerShell is unavailable or access is denied.
-    """
-    scope_r, opts_r, excl_r = await executor.get_scope_detail(str(scope_id))
-
-    if scope_r.return_code < 0:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=scope_r.stderr,
-        )
-    if not scope_r.success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Scope {scope_id} not found",
-        )
-
-    scope_list = parse_ps_json(scope_r.stdout)
-    scope_info = DHCPScopeInfo(**scope_info_from_ps(scope_list[0])) if scope_list else None
-    if scope_info is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unexpected empty response from DHCP server",
-        )
-
-    if not opts_r.success:
-        logger.warning("Failed to fetch options for scope %s: %s", scope_id, opts_r.stderr)
-    if not excl_r.success:
-        logger.warning("Failed to fetch exclusions for scope %s: %s", scope_id, excl_r.stderr)
-
-    return ScopeDetailResponse(
-        scope=scope_info,
-        options=parse_ps_json(opts_r.stdout) if opts_r.success else [],
-        exclusions=parse_ps_json(excl_r.stdout) if excl_r.success else [],
-    )
-
-
 @router.delete(
     "/{scope_id}",
     response_model=DeleteScopeResponse,
@@ -269,17 +260,19 @@ async def delete_scope(scope_id: IPv4Address = Path(...)):
         )
 
     steps = await executor.delete_scope(str(scope_id))
-    overall = all(s.success for s in steps)
 
     scope_step = next((s for s in steps if s.step == "remove_scope"), None)
     if scope_step is None or not scope_step.success:
         detail = scope_step.error if scope_step else "remove_scope step missing from response"
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)
 
+    # overall_success reflects whether the scope was deleted (the critical step).
+    # Non-critical steps like remove_failover may fail without affecting this flag;
+    # inspect steps[] for the full picture.
     return DeleteScopeResponse(
         deleted=str(scope_id),
         steps=steps,
-        overall_success=overall,
+        overall_success=scope_step.success,
     )
 
 

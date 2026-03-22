@@ -9,14 +9,17 @@ from ipaddress import IPv4Address
 from pydantic import ValidationError
 
 from models.schemas import (
-    DHCPScopeInfo,
     DHCPScopeRequest,
     ExclusionRange,
     FailoverConfig,
-    ScopeListResponse,
+    FullScopeDetailResponse,
+    FullScopeExclusion,
+    FullScopeFailover,
+    FullScopeInfo,
+    FullScopeListResponse,
     ScopeStateRequest,
 )
-from services.executor import scope_info_from_ps
+from services.executor import full_scope_from_ps
 
 
 MINIMAL = dict(
@@ -36,7 +39,6 @@ class TestDHCPScopeRequest:
 
     def test_default_exclusions_applied_when_omitted(self):
         req = DHCPScopeRequest(**MINIMAL)
-        # Two default exclusion ranges should be generated
         assert len(req.exclusions) == 2
         assert req.exclusions[0].start_address == IPv4Address("10.20.120.1")
         assert req.exclusions[0].end_address == IPv4Address("10.20.120.10")
@@ -58,8 +60,6 @@ class TestDHCPScopeRequest:
             DHCPScopeRequest(**{**MINIMAL, "start_range": "10.20.120.240", "end_range": "10.20.120.50"})
 
     def test_range_outside_network_raises(self):
-        # end_range is outside the /24 but still > start_range, so the network
-        # check fires (not the range-order check which would give a different message)
         with pytest.raises(ValidationError, match="outside"):
             DHCPScopeRequest(**{**MINIMAL, "end_range": "10.20.121.1"})
 
@@ -87,8 +87,8 @@ class TestFailoverConfig:
         assert req.failover.mode == "HotStandby"
 
 
-class TestDHCPScopeInfo:
-    """DHCPScopeInfo uses PowerShell aliases for population."""
+class TestFullScopeInfo:
+    """FullScopeInfo is the rich response model for all GET scope endpoints."""
 
     PS_SCOPE = {
         "ScopeId": "10.20.120.0",
@@ -97,35 +97,142 @@ class TestDHCPScopeInfo:
         "StartRange": "10.20.120.50",
         "EndRange": "10.20.120.240",
         "State": "Active",
+        "LeaseDuration": "8.00:00:00",
+        "Description": "Engineering floor",
     }
 
     def test_populated_from_powershell_dict(self):
-        info = DHCPScopeInfo(**scope_info_from_ps(self.PS_SCOPE))
+        info = FullScopeInfo(**full_scope_from_ps(self.PS_SCOPE))
         assert info.scope_id == "10.20.120.0"
         assert info.name == "VLAN-120"
         assert info.state == "Active"
+        assert info.lease_duration == "8.00:00:00"
+        assert info.description == "Engineering floor"
+
+    def test_optional_fields_default_to_none_or_empty(self):
+        info = FullScopeInfo(**full_scope_from_ps(self.PS_SCOPE))
+        assert info.gateway is None
+        assert info.dns_servers == []
+        assert info.dns_domain is None
+        assert info.exclusions == []
+        assert info.failover is None
 
     def test_response_uses_snake_case_keys(self):
-        info = DHCPScopeInfo(**scope_info_from_ps(self.PS_SCOPE))
+        info = FullScopeInfo(**full_scope_from_ps(self.PS_SCOPE))
         dumped = info.model_dump()
         assert "scope_id" in dumped
         assert "ScopeId" not in dumped
 
-
-class TestScopeListResponse:
-    def test_count_matches_list_length(self):
-        ps_scopes = [
-            {"ScopeId": "10.0.1.0", "Name": "A", "SubnetMask": "255.255.255.0",
-             "StartRange": "10.0.1.10", "EndRange": "10.0.1.240", "State": "Active"},
-            {"ScopeId": "10.0.2.0", "Name": "B", "SubnetMask": "255.255.255.0",
-             "StartRange": "10.0.2.10", "EndRange": "10.0.2.240", "State": "Active"},
-        ]
-        resp = ScopeListResponse(
-            scopes=[DHCPScopeInfo(**scope_info_from_ps(s)) for s in ps_scopes],
-            count=len(ps_scopes),
+    def test_fully_populated(self):
+        info = FullScopeInfo(
+            scope_id="10.20.120.0",
+            name="VLAN-120",
+            subnet_mask="255.255.255.0",
+            start_range="10.20.120.50",
+            end_range="10.20.120.240",
+            state="Active",
+            lease_duration="8.00:00:00",
+            description="test",
+            gateway="10.20.120.1",
+            dns_servers=["10.10.1.5", "10.10.1.6"],
+            dns_domain="lab.local",
+            exclusions=[
+                FullScopeExclusion(start_range="10.20.120.1", end_range="10.20.120.10"),
+            ],
+            failover=FullScopeFailover(
+                relationship_name="FO-VLAN-120",
+                partner_server="dhcp02.lab.local",
+                mode="HotStandby",
+                state="Normal",
+                server_role="Active",
+                reserve_percent=5,
+                max_client_lead_time="1:00:00",
+                scope_ids=["10.20.120.0"],
+            ),
         )
+        assert info.gateway == "10.20.120.1"
+        assert info.dns_servers == ["10.10.1.5", "10.10.1.6"]
+        assert len(info.exclusions) == 1
+        assert info.failover is not None
+        assert info.failover.mode == "HotStandby"
+
+    def test_missing_lease_duration_defaults_to_none(self):
+        ps_scope = {k: v for k, v in self.PS_SCOPE.items() if k != "LeaseDuration"}
+        info = FullScopeInfo(**full_scope_from_ps(ps_scope))
+        assert info.lease_duration is None
+
+
+class TestFullScopeExclusion:
+    def test_construction(self):
+        exc = FullScopeExclusion(start_range="10.0.0.1", end_range="10.0.0.10")
+        assert exc.start_range == "10.0.0.1"
+        assert exc.end_range == "10.0.0.10"
+
+
+class TestFullScopeFailover:
+    def test_hotstandby_shape(self):
+        fo = FullScopeFailover(
+            relationship_name="FO-TEST",
+            partner_server="dhcp02.lab.local",
+            mode="HotStandby",
+            state="Normal",
+            server_role="Active",
+            reserve_percent=5,
+            scope_ids=["10.0.0.0"],
+        )
+        assert fo.mode == "HotStandby"
+        assert fo.server_role == "Active"
+        assert fo.load_balance_percent is None
+
+    def test_loadbalance_shape(self):
+        fo = FullScopeFailover(
+            relationship_name="FO-TEST",
+            partner_server="dhcp02.lab.local",
+            mode="LoadBalance",
+            state="Normal",
+            load_balance_percent=50,
+            scope_ids=["10.0.0.0"],
+        )
+        assert fo.mode == "LoadBalance"
+        assert fo.load_balance_percent == 50
+        assert fo.server_role is None
+
+
+class TestFullScopeListResponse:
+    def test_count_matches_list_length(self):
+        scopes = [
+            FullScopeInfo(
+                scope_id="10.0.1.0", name="A", subnet_mask="255.255.255.0",
+                start_range="10.0.1.10", end_range="10.0.1.240", state="Active",
+            ),
+            FullScopeInfo(
+                scope_id="10.0.2.0", name="B", subnet_mask="255.255.255.0",
+                start_range="10.0.2.10", end_range="10.0.2.240", state="Active",
+            ),
+        ]
+        resp = FullScopeListResponse(scopes=scopes, count=len(scopes))
         assert resp.count == 2
         assert len(resp.scopes) == 2
+
+    def test_count_mismatch_raises(self):
+        scopes = [
+            FullScopeInfo(
+                scope_id="10.0.1.0", name="A", subnet_mask="255.255.255.0",
+                start_range="10.0.1.10", end_range="10.0.1.240", state="Active",
+            ),
+        ]
+        with pytest.raises(ValidationError, match="count"):
+            FullScopeListResponse(scopes=scopes, count=99)
+
+
+class TestFullScopeDetailResponse:
+    def test_wraps_single_scope(self):
+        scope = FullScopeInfo(
+            scope_id="10.0.1.0", name="A", subnet_mask="255.255.255.0",
+            start_range="10.0.1.10", end_range="10.0.1.240", state="Active",
+        )
+        resp = FullScopeDetailResponse(scope=scope)
+        assert resp.scope.scope_id == "10.0.1.0"
 
 
 class TestScopeStateRequest:
