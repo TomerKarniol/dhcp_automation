@@ -16,6 +16,7 @@ import logging
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.router import router
 from core.security import require_api_key
@@ -39,6 +40,13 @@ app = FastAPI(
     version="1.1.0",
     description="Provision and manage DHCP scopes on a Windows DHCP server via PowerShell.",
     dependencies=[Depends(require_api_key)],
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(router)
