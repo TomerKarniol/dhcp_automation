@@ -201,8 +201,6 @@ cd frontend
 npm run lint
 ```
 
-(At time of update: lint has warnings, no errors.)
-
 ## Security Notes
 
 - All backend routes require `X-API-Key`.
