@@ -8,20 +8,24 @@ from fastapi.responses import JSONResponse
 from api.test_data import FAKE_SCOPES
 from core.decorators import http_response, log_route
 from models.schemas import (
+    AddFailoverRequest,
     DHCPScopeRequest,
     DHCPScopeResponse,
     DeleteScopeResponse,
+    FailoverOperationResponse,
     FullScopeDetailResponse,
     FullScopeListResponse,
     ScopeExistsResponse,
     ScopeStateRequest,
     ScopeStateResponse,
+    UpdateFailoverRequest,
 )
 from services import executor
 from services.executor import (
     DHCPProvisioner,
     PowerShellUnavailableError,
     ScopeNotFoundError,
+    parse_ps_json,
 )
 
 
@@ -314,3 +318,167 @@ async def set_scope_state(req: ScopeStateRequest, scope_id: IPv4Address = Path(.
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.stderr)
 
     return ScopeStateResponse(scope_id=str(scope_id), state=req.state)
+
+
+@router.post(
+    "/{scope_id}/failover",
+    response_model=FailoverOperationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a failover relationship to an existing scope",
+    responses={
+        201: {"description": "Failover relationship added successfully"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found"},
+        409: {"description": "Failover relationship already exists for this scope"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
+)
+@log_route
+@http_response
+async def add_failover(req: AddFailoverRequest, scope_id: IPv4Address = Path(...)):
+    """
+    Adds a new DHCP failover relationship to an existing scope using
+    Add-DhcpServerv4Failover.  The scope must exist and must not already
+    have a failover relationship.
+
+    Returns 201 on success.
+    Returns 404 if the scope does not exist.
+    Returns 409 if a failover relationship already exists for this scope.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
+    try:
+        exists = await executor.scope_exists(str(scope_id))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+    if not exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scope {scope_id} not found",
+        )
+
+    result = await executor.add_failover(str(scope_id), req)
+    if not result.success:
+        if "already exists" in result.stderr.lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A failover relationship already exists for scope {scope_id}.",
+            )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.stderr)
+
+    return FailoverOperationResponse(scope_id=str(scope_id), action="added", success=True)
+
+
+@router.patch(
+    "/{scope_id}/failover",
+    response_model=FailoverOperationResponse,
+    summary="Update an existing failover relationship for a scope",
+    responses={
+        200: {"description": "Failover relationship updated successfully"},
+        400: {"description": "No fields provided to update"},
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Scope not found or no failover configured"},
+        500: {"description": "PowerShell command failed"},
+        503: {"description": "PowerShell unavailable or access denied"},
+    },
+)
+@log_route
+@http_response
+async def update_failover(req: UpdateFailoverRequest, scope_id: IPv4Address = Path(...)):
+    """
+    Updates an existing DHCP failover relationship using Set-DhcpServerv4Failover.
+    The relationship name is retrieved automatically from the DHCP server.
+    Only the fields present in the request body are updated.
+
+    Returns 200 on success.
+    Returns 400 if no fields were provided to update.
+    Returns 404 if the scope does not exist or has no failover relationship.
+    Returns 500 if the PowerShell command failed.
+    Returns 503 if PowerShell is unavailable or access is denied.
+    """
+    if all(v is None for v in [
+        req.server_role,
+        req.reserve_percent,
+        req.load_balance_percent,
+        req.max_client_lead_time_minutes,
+        req.shared_secret,
+    ]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one field must be provided to update.",
+        )
+
+    # Retrieve the relationship name and mode from the DHCP server
+    fo_result = await executor.run_powershell(
+        f"Get-DhcpServerv4Failover -ScopeId {scope_id} -ErrorAction SilentlyContinue"
+        f" | Select-Object Name, Mode | ConvertTo-Json -Compress"
+    )
+    if fo_result.return_code < 0:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=fo_result.stderr)
+    if not fo_result.stdout.strip():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No failover relationship found for scope {scope_id}.",
+        )
+
+    try:
+        fo_list = parse_ps_json(fo_result.stdout)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to parse failover relationship data from DHCP server.",
+        )
+
+    if not fo_list:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No failover relationship found for scope {scope_id}.",
+        )
+
+    fo_data = fo_list[0]
+    relationship_name: str = fo_data.get("Name", "").strip()
+    fo_mode: str = fo_data.get("Mode", "").strip()
+
+    if not relationship_name:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No failover relationship found for scope {scope_id}.",
+        )
+
+    # Validate that the caller is not setting a percent field that does not apply to this mode
+    if fo_mode == "HotStandby" and req.load_balance_percent is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="load_balance_percent cannot be set on a HotStandby relationship. Use reserve_percent instead.",
+        )
+    if fo_mode == "LoadBalance" and req.reserve_percent is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="reserve_percent cannot be set on a LoadBalance relationship. Use load_balance_percent instead.",
+        )
+    if fo_mode == "LoadBalance" and req.server_role is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="server_role only applies to HotStandby relationships.",
+        )
+
+    # server_role change requires remove + recreate (Set-DhcpServerv4Failover has no -ServerRole)
+    if req.server_role is not None:
+        success, error = await executor.swap_failover_server_role(
+            scope_id=str(scope_id),
+            new_role=req.server_role,
+            override_reserve_percent=req.reserve_percent,
+            override_mclt_minutes=req.max_client_lead_time_minutes,
+        )
+        if not success:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=error)
+        return FailoverOperationResponse(scope_id=str(scope_id), action="updated", success=True)
+
+    # Normal update path — no server_role change
+    result = await executor.update_failover(relationship_name, req)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.stderr)
+
+    return FailoverOperationResponse(scope_id=str(scope_id), action="updated", success=True)

@@ -285,6 +285,50 @@ class ExclusionResponse(BaseModel):
 #  Failover
 # --------------------------------------------------------------------------- #
 
+class AddFailoverRequest(BaseModel):
+    """Request model for adding failover to an existing scope."""
+
+    partner_server: str = Field(
+        default=config.DEFAULT_FAILOVER_PARTNER,
+        min_length=1,
+    )
+    relationship_name: Optional[str] = Field(default=None)
+    mode: Literal["HotStandby", "LoadBalance"] = Field(default=config.DEFAULT_FAILOVER_MODE)
+    server_role: Literal["Active", "Standby"] = Field(default=config.DEFAULT_FAILOVER_SERVER_ROLE)
+    reserve_percent: int = Field(default=config.DEFAULT_FAILOVER_RESERVE_PERCENT, ge=0, le=100)
+    load_balance_percent: int = Field(default=config.DEFAULT_FAILOVER_LB_PERCENT, ge=0, le=100)
+    max_client_lead_time_minutes: int = Field(default=config.DEFAULT_FAILOVER_MCLT_MINUTES, ge=1)
+    shared_secret: Optional[str] = Field(default=config.DEFAULT_FAILOVER_SHARED_SECRET, min_length=8)
+
+    @model_validator(mode="after")
+    def _validate_mode_params(self) -> "AddFailoverRequest":
+        check_failover_mode_params(self.mode, self.server_role)
+        return self
+
+
+class UpdateFailoverRequest(BaseModel):
+    """Fields that can be changed on an existing failover relationship.
+
+    Pass only the fields you want to update — all are optional.
+    Mode and partner server cannot be changed; remove and re-add to change those.
+
+    server_role (HotStandby only) — triggers a remove-then-recreate flow because
+    Set-DhcpServerv4Failover does not support -ServerRole.
+    """
+
+    server_role: Optional[Literal["Active", "Standby"]] = Field(default=None)
+    reserve_percent: Optional[int] = Field(default=None, ge=0, le=100)
+    load_balance_percent: Optional[int] = Field(default=None, ge=0, le=100)
+    max_client_lead_time_minutes: Optional[int] = Field(default=None, ge=1)
+    shared_secret: Optional[str] = Field(default=None, min_length=8)
+
+
+class FailoverOperationResponse(BaseModel):
+    scope_id: str
+    action: Literal["added", "updated"]
+    success: bool
+
+
 class FailoverListResponse(BaseModel):
     relationships: list[dict[str, Any]]  # raw PS JSON – field names vary by PS version
     count: int

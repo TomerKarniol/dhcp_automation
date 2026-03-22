@@ -22,10 +22,12 @@ class ExclusionPair(NamedTuple):
 # --------------------------------------------------------------------------- #
 
 def check_subnet_mask(mask: IPv4Address) -> IPv4Address:
-    """Validate that *mask* is a non-zero contiguous subnet mask."""
+    """Validate that *mask* is a non-zero, non-host contiguous subnet mask."""
     mask_int = int(mask)
     if mask_int == 0:
         raise ValueError("Subnet mask cannot be 0.0.0.0")
+    if mask_int == 0xFFFFFFFF:
+        raise ValueError("255.255.255.255 (/32) is not a valid DHCP scope subnet mask")
     inverted = mask_int ^ 0xFFFFFFFF
     if (inverted & (inverted + 1)) != 0:
         raise ValueError(f"{mask} is not a valid contiguous subnet mask")

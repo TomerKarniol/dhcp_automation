@@ -364,6 +364,130 @@ async def list_failover() -> CommandResult:
     return await run_powershell("Get-DhcpServerv4Failover | ConvertTo-Json -Compress")
 
 
+async def add_failover(scope_id: str, fo: "AddFailoverRequest") -> CommandResult:  # type: ignore[name-defined]
+    """Add a failover relationship to an existing scope."""
+    from models.schemas import AddFailoverRequest as _AFR  # local import to avoid circular
+    if not isinstance(fo, _AFR):
+        raise TypeError(f"Expected AddFailoverRequest, got {type(fo).__name__}")
+
+    rel_name = fo.relationship_name or f"FO-{scope_id}"
+    mclt = _minutes_to_timespan(fo.max_client_lead_time_minutes)
+
+    cmd = (
+        f'Add-DhcpServerv4Failover -Name "{_ps_escape(rel_name)}" '
+        f"-ScopeId {scope_id} "
+        f'-PartnerServer "{_ps_escape(fo.partner_server)}" '
+        f"-MaxClientLeadTime {mclt} "
+        f"-Force"
+    )
+
+    if fo.mode == "HotStandby":
+        cmd += f" -ServerRole {fo.server_role} -ReservePercent {fo.reserve_percent}"
+    else:
+        cmd += f" -LoadBalancePercent {fo.load_balance_percent}"
+
+    if fo.shared_secret:
+        cmd += f' -SharedSecret "{_ps_escape(fo.shared_secret)}"'
+
+    return await run_powershell(cmd)
+
+
+async def update_failover(relationship_name: str, req: "UpdateFailoverRequest") -> CommandResult:  # type: ignore[name-defined]
+    """Update an existing failover relationship by name using Set-DhcpServerv4Failover.
+
+    Does NOT handle server_role changes — use swap_failover_server_role for that.
+    """
+    cmd = f'Set-DhcpServerv4Failover -Name "{_ps_escape(relationship_name)}"'
+
+    if req.reserve_percent is not None:
+        cmd += f" -ReservePercent {req.reserve_percent}"
+    if req.load_balance_percent is not None:
+        cmd += f" -LoadBalancePercent {req.load_balance_percent}"
+    if req.max_client_lead_time_minutes is not None:
+        cmd += f" -MaxClientLeadTime {_minutes_to_timespan(req.max_client_lead_time_minutes)}"
+    if req.shared_secret is not None:
+        cmd += f' -SharedSecret "{_ps_escape(req.shared_secret)}"'
+
+    return await run_powershell(cmd)
+
+
+async def swap_failover_server_role(
+    scope_id: str,
+    new_role: str,
+    override_reserve_percent: int | None = None,
+    override_mclt_minutes: int | None = None,
+) -> tuple[bool, str]:
+    """Change the ServerRole on a HotStandby relationship.
+
+    Set-DhcpServerv4Failover does not support -ServerRole, so the only way to
+    change it is to remove the existing relationship and recreate it.  All
+    current settings (Name, PartnerServer, ReservePercent, MaxClientLeadTime)
+    are preserved from the live config unless an override is supplied.
+
+    Note: SharedSecret is not exposed by Get-DhcpServerv4Failover, so it is
+    NOT preserved — the relationship is recreated without one.
+
+    Returns (success: bool, error: str).
+    """
+    # ── Step 1: Fetch current config ──────────────────────────────────────────
+    get_result = await run_powershell(
+        f"Get-DhcpServerv4Failover -ScopeId {scope_id} -ErrorAction SilentlyContinue"
+        f" | ConvertTo-Json -Compress"
+    )
+    if not get_result.success or not get_result.stdout.strip():
+        return False, f"Could not retrieve failover config for scope {scope_id}: {get_result.stderr}"
+
+    try:
+        fo_raw = parse_ps_json(get_result.stdout)
+        fo = fo_raw[0] if fo_raw else {}
+    except RuntimeError as exc:
+        return False, str(exc)
+
+    name = str(fo.get("Name") or "").strip()
+    partner = str(fo.get("PartnerServer") or "").strip()
+    reserve = fo.get("ReservePercent")
+    mclt_str = str(fo.get("MaxClientLeadTime") or "1:00:00").strip()
+
+    if not name or not partner:
+        return False, f"Failover relationship for scope {scope_id} returned incomplete data."
+
+    # Apply overrides
+    final_reserve = override_reserve_percent if override_reserve_percent is not None else (reserve if reserve is not None else 5)
+    final_mclt = _minutes_to_timespan(override_mclt_minutes) if override_mclt_minutes is not None else mclt_str
+
+    # ── Step 2: Remove existing relationship ─────────────────────────────────
+    remove_result = await run_powershell(
+        f'Remove-DhcpServerv4Failover -Name "{_ps_escape(name)}" -Force'
+    )
+    if not remove_result.success:
+        return False, f"Failed to remove failover relationship '{name}': {remove_result.stderr}"
+
+    # ── Step 3: Recreate with new server role ─────────────────────────────────
+    add_cmd = (
+        f'Add-DhcpServerv4Failover -Name "{_ps_escape(name)}" '
+        f"-ScopeId {scope_id} "
+        f'-PartnerServer "{_ps_escape(partner)}" '
+        f"-ServerRole {new_role} "
+        f"-ReservePercent {final_reserve} "
+        f"-MaxClientLeadTime {final_mclt} "
+        f"-Force"
+    )
+    add_result = await run_powershell(add_cmd)
+    if not add_result.success:
+        recovery_cmd = (
+            f'Add-DhcpServerv4Failover -Name "{name}" -ScopeId {scope_id} '
+            f'-PartnerServer "{partner}" -ServerRole {new_role} '
+            f"-ReservePercent {final_reserve} -MaxClientLeadTime {final_mclt} -Force"
+        )
+        return False, (
+            f"Removed old relationship but failed to recreate with new role '{new_role}': "
+            f"{add_result.stderr}. "
+            f"To recover manually run: {recovery_cmd}"
+        )
+
+    return True, ""
+
+
 # --------------------------------------------------------------------------- #
 #  Rich scope builders
 #  Execute 4 parallel PS calls and join the results in Python.
