@@ -124,8 +124,8 @@ export function ScopeCard({ scope, onSelect }: ScopeCardProps) {
           <div className="flex items-start gap-2 text-sm">
             <Server className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
             <div className="min-w-0">
-              <div className="text-xs text-muted-foreground">Search domain: {scope.dns_domain || "—"}</div>
-              <div className="text-xs text-muted-foreground">DNS servers: {scope.dns_servers.length > 0 ? scope.dns_servers.join(", ") : "—"}</div>
+              <div className="text-xs text-white">Search domain: {scope.dns_domain || "—"}</div>
+              <div className="text-xs text-white">DNS servers: {scope.dns_servers.length > 0 ? scope.dns_servers.join(", ") : "—"}</div>
             </div>
           </div>
 
