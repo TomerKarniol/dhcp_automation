@@ -5,7 +5,6 @@ Every route automatically requires the header X-API-Key when this dependency is
 applied globally in main.py.
 """
 
-import hmac
 import os
 
 from fastapi import HTTPException, Security, status
@@ -13,12 +12,15 @@ from fastapi.security import APIKeyHeader
 
 _header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
-# Read once at import time — startup.py already validates it is non-empty.
-_EXPECTED_KEY: str = os.getenv("DHCP_API_KEY", "")
-
 
 def require_api_key(key: str = Security(_header)) -> str:
-    if not hmac.compare_digest(key, _EXPECTED_KEY):
+    expected = os.getenv("DHCP_API_KEY", "")
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server misconfiguration: DHCP_API_KEY is not set",
+        )
+    if key != expected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
