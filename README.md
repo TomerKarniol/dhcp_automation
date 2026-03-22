@@ -1,253 +1,223 @@
-# DHCP Automation API
+# DHCP Automation
 
-A FastAPI service that provisions and manages Windows DHCP scopes via PowerShell.
-Runs directly on the Windows DHCP server and exposes a REST API for scope creation, DNS configuration, exclusion ranges, failover setup, and scope lifecycle management.
+DHCP Automation is a two-part system for managing Windows DHCP scopes:
 
----
+- A **FastAPI backend** that runs PowerShell cmdlets on a Windows DHCP server
+- A **Next.js frontend** for operators to create, inspect, and modify scopes
 
-## Prerequisites
+The backend handles scope lifecycle, DNS options, exclusions, and failover relationships. The frontend provides a dashboard, create wizard, detail panel, and lightweight login gate.
 
-| Requirement          | Notes                                                                        |
-| -------------------- | ---------------------------------------------------------------------------- |
-| Windows Server       | With the **DHCP Server** role installed                                      |
-| Python 3.10+         | [python.org](https://www.python.org/downloads/) — add to PATH during install |
-| Run as Administrator | Or member of the **DHCP Administrators** local group                         |
+## Repository Layout
 
----
-
-## Installation
-
-```powershell
-# 1. Clone / copy the project to the server
-cd C:\dhcp-api
-
-# 2. Create and activate a virtual environment
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-
-# 3. Install dependencies
-pip install -r requirements.txt
+```text
+.
+├── src/                     # FastAPI backend
+├── tests/                   # Python tests (backend)
+├── frontend/                # Next.js UI
+├── example_requests.json    # API request examples
+├── requirements.txt
+└── README.md
 ```
 
-> **PowerShell execution policy** – if `Activate.ps1` is blocked, run once:
->
-> ```powershell
-> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-> ```
+## Backend (FastAPI + PowerShell)
 
----
+### What it does
 
-## Configuration
+- Validates DHCP scope payloads with Pydantic + custom validators
+- Executes Windows DHCP cmdlets via `powershell.exe`
+- Returns structured step-by-step provisioning results
+- Supports partial success (`207`) when non-critical steps fail
+- Protects all routes with `X-API-Key`
 
-Edit [`src/core/config.py`](src/core/config.py) before first run:
+### Key backend files
 
-```python
-DEFAULT_DNS_SERVERS       = ["10.10.1.5", "10.10.1.6"]   # your DNS servers
-DEFAULT_DNS_DOMAIN        = "lab.local"                    # your domain
-DEFAULT_FAILOVER_PARTNER  = "dhcp02.lab.local"            # standby DHCP server
-DEFAULT_LEASE_DURATION_DAYS = 8
-```
-
----
-
-## Authentication
-
-Every request requires an `X-API-Key` header. The expected key is loaded from a `.env` file in the repo root.
-
-**Create `.env` before first run:**
-
-```
-DHCP_API_KEY=your-secret-key
-```
-
-The server will refuse to start if `DHCP_API_KEY` is not set.
-
-**Passing the key in requests:**
-
-```powershell
-curl -X POST http://dhcp01:8080/scopes `
-  -H "Content-Type: application/json" `
-  -H "X-API-Key: your-secret-key" `
-  -d '{...}'
-```
-
-**Swagger UI (`/docs`):** click **Authorize** (top right), enter the key, click **Authorize** — all "Try it out" requests will include it automatically.
-
-**GitHub Actions:** store the key as a repository secret and pass it as a header:
-
-```yaml
--H "X-API-Key: ${{ secrets.DHCP_API_KEY }}"
-```
-
----
-
-## Running
-
-```powershell
-cd src
-
-# HTTP (development / internal network)
-uvicorn main:app --host 0.0.0.0 --port 8080
-
-# HTTPS (recommended for production)
-uvicorn main:app --host 0.0.0.0 --port 8443 --ssl-keyfile key.pem --ssl-certfile cert.pem
-```
-
-Interactive API docs are available at `http(s)://<server>:<port>/docs`.
-
----
-
-## API Endpoints
-
-| Method   | Path                            | Description                                               |
-| -------- | ------------------------------- | --------------------------------------------------------- |
-| `GET`    | `/health`                       | Check DHCP service reachability                           |
-| `POST`   | `/scopes`                       | Create scope with DNS, exclusions, failover               |
-| `GET`    | `/scopes`                       | List all scopes                                           |
-| `GET`    | `/scopes/{scope_id}`            | Get scope details (info + options + exclusions)           |
-| `GET`    | `/scopes/{scope_id}/exists`     | Check if a scope exists → `true`/`false`                  |
-| `DELETE` | `/scopes/{scope_id}`            | Remove a scope (auto-removes failover relationship first) |
-| `PATCH`  | `/scopes/{scope_id}/dns`        | Update DNS servers / domain suffix                        |
-| `PATCH`  | `/scopes/{scope_id}/state`      | Activate or deactivate a scope                            |
-| `POST`   | `/scopes/{scope_id}/exclusions` | Add exclusion range                                       |
-| `DELETE` | `/scopes/{scope_id}/exclusions` | Remove exclusion range                                    |
-| `GET`    | `/failover`                     | List failover relationships                               |
-
-### Minimal create request
-
-```json
-{
-  "scope_name": "VLAN-120-Engineering",
-  "network": "10.20.120.0",
-  "subnet_mask": "255.255.255.0",
-  "start_range": "10.20.120.50",
-  "end_range": "10.20.120.240",
-  "gateway": "10.20.120.1",
-  "failover": {}
-}
-```
-
-DNS, exclusions, and failover defaults are applied from `config.py` when omitted.
-Exclusion ranges must be within the scope's network (validated at request time).
-See [`example_requests.json`](example_requests.json) for full examples.
-
-### Update DNS for an existing scope
-
-```
-PATCH /scopes/10.20.120.0/dns
-```
-
-```json
-{
-  "dns_servers": ["10.10.1.5", "10.10.1.6"],
-  "dns_domain": "corp.local"
-}
-```
-
-`dns_domain` is optional — omit it to leave the current suffix unchanged.
-
-### Activate / deactivate a scope
-
-```
-PATCH /scopes/10.20.120.0/state
-```
-
-```json
-{ "state": "Inactive" }
-```
-
-Useful for temporarily disabling a cluster segment during maintenance without deleting it.
-
-### Response codes
-
-| Code  | Meaning                                                                                               |
-| ----- | ----------------------------------------------------------------------------------------------------- |
-| `200` | Request processed successfully                                                                        |
-| `401` | Missing or invalid API key                                                                            |
-| `201` | Scope created, all steps succeeded                                                                    |
-| `207` | Scope created but a non-critical step failed (exclusions or failover) — inspect `steps[]`             |
-| `404` | Scope or resource not found                                                                           |
-| `409` | Conflict — scope already exists, or exclusion range has active leases                                 |
-| `422` | Invalid request payload (bad IP, reversed range, out-of-network exclusion, invalid state value, etc.) |
-| `500` | PowerShell command failed (scope was not created)                                                     |
-| `503` | PowerShell unavailable, DHCP service unreachable, or access denied                                    |
-
----
-
-## Project Structure
-
-```
+```text
 src/
-├── main.py               # App entry point; calls validate_config() at startup
+├── main.py
 ├── core/
-│   ├── config.py         # Defaults (DNS, failover, exclusions, lease) — edit before first run
-│   ├── startup.py        # Config validation — runs at startup, refuses to start on bad values
-│   ├── security.py       # API key authentication dependency
-│   └── decorators.py     # @log_route, @http_response
+│   ├── config.py
+│   ├── startup.py
+│   ├── security.py
+│   └── decorators.py
 ├── models/
-│   ├── schemas.py        # Pydantic request/response models
-│   └── validators.py     # Pure validation logic (no framework dependency)
+│   ├── schemas.py
+│   └── validators.py
 ├── services/
-│   └── executor.py       # PowerShell runner, standalone service functions,
-│                         #   DHCPProvisioner pipeline
+│   └── executor.py
 └── api/
     ├── router.py
+    ├── test_data.py
     └── routes/
         ├── health.py
         ├── scopes.py
+        ├── dns.py
         ├── exclusions.py
-        ├── failover.py
-        └── dns.py
-tests/
-├── helpers.py            # Shared CommandResult helpers (_ok, _fail, _unavailable)
-├── test_validators.py    # Pure unit tests (no Windows needed)
-├── test_schemas.py       # Pydantic validation tests (no Windows needed)
-├── test_executor.py      # Service-layer tests with mocked PowerShell
-└── test_routes.py        # HTTP-layer tests with mocked PowerShell
+        └── failover.py
 ```
 
----
+## Frontend (Next.js 16)
+
+### What it does
+
+- Login page with session-based auth gate
+- Dashboard with scope search/filter/grouping
+- Create scope wizard (validated with Zod)
+- Scope detail panel actions:
+  - Activate/deactivate scope
+  - Update DNS
+  - Add/remove exclusions
+  - Add/update failover
+  - Delete scope
+- Health indicator polling `/health`
+
+### Important frontend behavior
+
+- API is called from the browser with headers including `X-API-Key`
+- `NEXT_PUBLIC_USE_TEST_DATA=true` switches list view to `/scopes/test`
+- Current auth is client-side env-credential based (`NEXT_PUBLIC_AUTH_USER/PASS`), suitable for internal/demo use, not hardened SSO
+
+## Prerequisites
+
+### Backend host
+
+- Windows Server with DHCP Server role
+- Python 3.10+
+- PowerShell available as `powershell.exe`
+- User with DHCP admin rights
+
+### Frontend host
+
+- Node.js 20+
+- npm
+
+## Environment Configuration
+
+### Backend `.env` (repo root)
+
+```env
+DHCP_API_KEY=your-secret-key
+```
+
+The backend startup validation fails if `DHCP_API_KEY` is missing.
+
+### Frontend `.env.local` (`frontend/.env.local`)
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8080
+NEXT_PUBLIC_DHCP_API_KEY=your-secret-key
+NEXT_PUBLIC_USE_TEST_DATA=false
+NEXT_PUBLIC_AUTH_USER=admin
+NEXT_PUBLIC_AUTH_PASS=change-me
+```
+
+## Installation
+
+### 1) Backend
+
+```bash
+cd /path/to/dhcp_automation
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2) Frontend
+
+```bash
+cd frontend
+npm install
+```
+
+## Running
+
+### Start backend
+
+```bash
+cd src
+uvicorn main:app --host 0.0.0.0 --port 8080
+```
+
+Docs: `http://localhost:8080/docs`
+
+### Start frontend
+
+```bash
+cd frontend
+npm run dev
+```
+
+UI: `http://localhost:3000`
+
+## API Summary
+
+Base URL: `http://<backend>:8080`
+
+- `GET /health`
+- `GET /scopes/test`
+- `GET /scopes`
+- `POST /scopes`
+- `GET /scopes/{scope_id}`
+- `GET /scopes/{scope_id}/exists`
+- `DELETE /scopes/{scope_id}`
+- `PATCH /scopes/{scope_id}/state`
+- `PATCH /scopes/{scope_id}/dns`
+- `POST /scopes/{scope_id}/exclusions?start=...&end=...`
+- `DELETE /scopes/{scope_id}/exclusions?start=...&end=...`
+- `POST /scopes/{scope_id}/failover`
+- `PATCH /scopes/{scope_id}/failover`
+- `GET /failover`
+
+Common statuses:
+
+- `200` success
+- `201` created
+- `207` partial success (scope created, some non-critical step failed)
+- `401` invalid/missing API key
+- `404` resource not found
+- `409` conflict (already exists / active lease conflict)
+- `422` validation error
+- `500` command or server error
+- `503` PowerShell unavailable / access denied / service unavailable
 
 ## Testing
 
-Tests run on **any OS** — PowerShell is mocked.
+### Backend tests
 
 ```bash
-# Activate venv first, then:
-pytest
-
-# Verbose output
-pytest -v
-
-# Single file
-pytest tests/test_validators.py
+pytest -q
 ```
 
----
+Latest run (provided by you):
 
-## Logging
+- `152 passed in 0.63s`
 
-Logs are written to **stderr** (the terminal / process output). There is no log file by default.
+### Frontend tests
 
-Every request is logged with entry, outcome, and elapsed time:
-
-```
-2025-01-15 10:23:41 [INFO]  dhcp_api.routes.create_scope: → create_scope
-2025-01-15 10:23:41 [INFO]  dhcp_api.executor: Executing: Add-DhcpServerv4Scope ...
-2025-01-15 10:23:42 [INFO]  dhcp_api.routes.create_scope: ← create_scope OK (812 ms)
+```bash
+cd frontend
+npx vitest run
 ```
 
-To also write logs to a file, uncomment the `FileHandler` line in `src/main.py`:
+### Frontend lint
 
-```python
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),                                               # stderr — always on
-        logging.FileHandler(r"C:\dhcp-api\dhcp_api.log", encoding="utf-8"),  # uncomment this line
-    ],
-)
+```bash
+cd frontend
+npm run lint
 ```
 
-Both handlers share the same format — logs go to stderr **and** the file simultaneously.
+(At time of update: lint has warnings, no errors.)
+
+## Security Notes
+
+- All backend routes require `X-API-Key`.
+- `NEXT_PUBLIC_*` variables are exposed to browser code. Do not treat frontend env values as secrets.
+- For production, place backend behind HTTPS/reverse proxy and replace client-side login with real identity/authn.
+
+## Example Requests
+
+See [`example_requests.json`](example_requests.json) for full payload examples, including:
+
+- Minimal scope creation
+- Full scope creation with overrides
+- LoadBalance failover example
+- DNS update example
