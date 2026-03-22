@@ -184,12 +184,8 @@ Common statuses:
 ### Backend tests
 
 ```bash
-pytest -q
+pytest -v
 ```
-
-Latest run (provided by you):
-
-- `152 passed in 0.63s`
 
 ### Frontend tests
 
