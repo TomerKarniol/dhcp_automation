@@ -20,10 +20,34 @@ from models.schemas import (
     ScopeStateRequest,
     ScopeStateResponse,
 )
+from api.test_data import FAKE_SCOPES
 from services import executor
 from services.executor import DHCPProvisioner, parse_ps_json, scope_info_from_ps
 
 router = APIRouter(prefix="/scopes", tags=["scopes"])
+
+
+@router.get(
+    "/test",
+    response_model=ScopeListResponse,
+    summary="Return 10 fake DHCP scopes for client testing",
+    responses={
+        200: {"description": "Ten fake scopes in the standard ScopeListResponse shape"},
+        401: {"description": "Missing or invalid API key"},
+    },
+)
+@log_route
+@http_response
+async def get_test_scopes():
+    """
+    Returns a static list of 10 fake DHCP scopes that match the real response
+    structure. No PowerShell is executed. Use this endpoint to develop and test
+    clients without a live DHCP server.
+
+    Returns 200 with the fake scope list.
+    Returns 401 if the API key is missing or invalid.
+    """
+    return ScopeListResponse(scopes=FAKE_SCOPES, count=len(FAKE_SCOPES))
 
 
 @router.post(
