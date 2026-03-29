@@ -19,7 +19,6 @@ ENV/
 .coverage
 htmlcov/
 
-# TLS certificates (never commit private keys)
 *.pem
 *.key
 *.crt
@@ -39,6 +38,23 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.turbo/
+.cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
 
 CLAUDE.md
 .claude/
